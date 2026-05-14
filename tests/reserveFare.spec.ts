@@ -1,90 +1,77 @@
 import { test, expect } from '@playwright/test';
 
 function parseFare(text: string): number {
-  // U+00A5 (&yen;) および U+FFE5（全角円記号）、カンマ、空白を除去
-  return parseInt(text.replace(/[¥￥,\s]/g, ''), 10);
+  return parseInt(text.replace(/[¥,\s]/g, ''), 10);
 }
 
-function getDateString(daysFromNow: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + daysFromNow);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
+function boardingDateString(): string {
+  const date = new Date();
+  date.setDate(date.getDate() + 7);
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
   return `${yyyy}/${mm}/${dd}`;
 }
 
-test.use({ baseURL: 'http://localhost:8083/atrs/' });
+test('TC-R-001: 子供料金の適用確認', async ({ page }) => {
+  // 1. ログインして空席照会画面（B101）に遷移する
+  await page.goto('auth/login?form');
+  await page.fill('#membershipNumber', '0000000001');
+  await page.fill('#password', 'aaaaa11111');
+  await page.click('#login-btn');
+  await expect(page).toHaveURL(/\/ticket\/search/);
 
-test.describe('予約フロー - 運賃算出検証', () => {
+  // 2. 出発地「東京（羽田）」・到着地「大阪（伊丹）」・片道・7日後の日付で照会する
+  await page.selectOption('#depAirportCd', { label: '東京(羽田)' });
+  await page.selectOption('#arrAirportCd', { label: '大阪(伊丹)' });
+  await page.check('input[name="flightType"][value="OW"]');
+  await page.check('input[name="boardingClassCd"][value="N"]');
+  await page.fill('#outwardDate', boardingDateString());
+  await page.dispatchEvent('#outwardDate', 'change');
+  await page.click('#flights-search-button');
 
-  // TC-R-001: 子供料金の適用確認
-  // 大人1名 + 子供(5歳)1名の合計金額が、大人2名分の運賃より安いことを検証する
-  test('TC-R-001: 子供料金の適用確認', async ({ page }) => {
+  // 3. 検索結果から最初のフライトを選択し「選択フライトを予約」ボタンを押す
+  // フライト一覧はAJAXで取得されるため、表示完了まで待機する
+  await expect(page.locator('#outward-flights')).toBeVisible({ timeout: 10_000 });
+  const firstFlight = page.locator('input[name="outward-flight-select"]').first();
+  await expect(firstFlight).toBeEnabled({ timeout: 10_000 });
+  await firstFlight.check();
+  await page.click('#reserve-flights-button');
 
-    // Step 1: ログイン → 空席照会画面へ
-    await page.goto('auth/login?form');
-    await page.fill('#membershipNumber', '0000000001');
-    await page.fill('#password', 'aaaaa11111');
-    await page.click('#login-btn');
-    await expect(page).toHaveURL(/\/ticket\/search/);
+  // ログイン済みのためB202（お客様情報入力画面）に直接遷移する
+  await expect(page.locator('h2:has-text("予約")')).toBeVisible();
 
-    // Step 2: 出発地「東京（羽田）」・到着地「大阪（伊丹）」・片道・7日後で検索
-    await page.locator('label.radio-inline').filter({ hasText: '片道' }).locator('input').check();
-    await page.selectOption('[name="depAirportCd"]', { label: '東京(羽田)' });
-    await page.selectOption('[name="arrAirportCd"]', { label: '大阪(伊丹)' });
-    await page.fill('[name="outwardDate"]', getDateString(7));
-    await page.locator('[name="boardingClassCd"]').first().check();
-    await page.click('#flights-search-button');
+  // 4. 「搭乗者を追加」ボタンを押して搭乗者2の入力欄を表示する
+  await page.click('#add-passenger-button');
+  await expect(page.locator('#passenger2')).toBeVisible();
 
-    // Step 3: フライト一覧の表示を待機（Ajax ロード）→ 最初の空席あり運賃を選択 → 予約
-    await expect(page.locator('[name="outward-flight-select"]:not([disabled])').first()).toBeVisible({ timeout: 10_000 });
-    await page.locator('[name="outward-flight-select"]:not([disabled])').first().check();
-    await page.click('#reserve-flights-button');
+  // 5. 搭乗者2に名前（カタカナ）・年齢「5」・性別「男性」を入力する
+  await page.fill('[name="passengerFormList[1].familyName"]', 'テスト');
+  await page.fill('[name="passengerFormList[1].givenName"]', 'コドモ');
+  await page.fill('[name="passengerFormList[1].age"]', '5');
+  await page.check('[name="passengerFormList[1].gender"][value="M"]');
 
-    // B202（お客様情報入力）への遷移を確認
-    await expect(page.locator('#customerinfo-form')).toBeVisible();
+  // 6. 「予約確認」ボタンを押してB203（申し込み内容確認画面）に遷移する
+  await page.click('input[name="confirm"]');
+  await expect(page.locator('h2:has-text("予約内容確認")')).toBeVisible();
 
-    // Step 4: 搭乗者を追加
-    await page.click('#add-passenger-button');
-    await expect(page.locator('#passenger2')).toBeVisible();
+  // 7. B203で金額を取得して確認する
 
-    // Step 5: 搭乗者2に情報を入力（カタカナ名・年齢5・性別男性）
-    await page.fill('[name="passengerFormList[1].familyName"]', 'ヤマダ');
-    await page.fill('[name="passengerFormList[1].givenName"]', 'タロウ');
-    await page.fill('[name="passengerFormList[1].age"]', '5');
-    await page.locator('#passenger2 label.radio-inline').filter({ hasText: '男性' }).locator('input').check();
+  // フライト情報一覧から大人1名分の運賃を取得する（運賃列 = テーブル最終列）
+  // h3 + table の隣接セレクタで flights テーブルのみに絞り込む
+  const adultFareText = await page
+    .locator('h3:has-text("選択フライト") + table tbody tr:first-child td:last-child')
+    .textContent();
+  const adultFare = parseFare(adultFareText ?? '');
 
-    // Step 6: 「予約確認」ボタン押下
-    await page.getByRole('button', { name: '予約確認' }).click();
+  // 合計金額を取得する
+  // h3 + p の隣接セレクタで合計金額のpのみに絞り込む
+  const totalFareText = await page
+    .locator('h3:has-text("合計金額") + p')
+    .textContent();
+  const totalFare = parseFare(totalFareText ?? '');
 
-    // B203（申し込み内容確認）への遷移を確認
-    await expect(page.locator('h2', { hasText: '予約内容確認' })).toBeVisible();
-
-    // Step 7: 合計金額と大人運賃を取得して比較
-    // 「選択フライト」テーブルの運賃列（最終td = 9列目）から大人1名分の運賃を取得
-    const fareText = await page
-      .locator('section')
-      .filter({ has: page.locator('h3', { hasText: '選択フライト' }) })
-      .locator('tbody tr')
-      .first()
-      .locator('td')
-      .last()
-      .textContent();
-
-    // 「合計金額」セクションの p 要素から取得
-    // section フィルタは外側の section にも一致するため、¥ を含む p に絞る
-    const totalText = await page
-      .locator('section')
-      .filter({ has: page.locator('h3', { hasText: '合計金額' }) })
-      .locator('p')
-      .filter({ hasText: /¥/ })
-      .textContent();
-
-    const adultFare = parseFare(fareText!);
-    const total = parseFare(totalText!);
-
-    // 子供料金は大人より安いため、合計金額 < 大人運賃 × 2 になるはず
-    expect(total).toBeLessThan(adultFare * 2);
-  });
+  // 合計金額が「大人運賃 × 2」より少ないことを確認する
+  // 子供料金（5歳）は大人料金より安いため、大人2名分の合計より小さくなるはず
+  expect(totalFare).toBeLessThan(adultFare * 2);
 });
